@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Apex Web Player (Minimal)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <!-- Tell GitHub Pages we're under /apex-player/ -->
+  <base href="/apex-player/">
+  <style>
+    body{font-family:system-ui,Arial,sans-serif;margin:16px}
+    .card{border:1px solid #ddd;border-radius:12px;padding:16px;margin-bottom:16px}
+    .row{display:flex;gap:16px;flex-wrap:wrap}
+    .col{flex:1;min-width:260px}
+    input,button{font-size:16px;padding:8px}
+    ul{list-style:none;padding:0;margin:0}
+    li{padding:6px 8px;border-bottom:1px solid #eee;cursor:pointer}
+    li:hover{background:#f9f9f9}
+    #log{font-family:ui-monospace,Consolas,Menlo,monospace;white-space:pre-wrap}
+    video{width:100%;max-height:60vh;background:#000}
+    .muted{color:#666}
+  </style>
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+</head>
+<body>
+  <script>
+    // 🔧 CHANGE THIS to your HTTPS proxy endpoint:
+    const API_BASE = "https://apextv.cc";
+  </script>
+
+  <h1>Apex Web Player (Minimal)</h1>
+
+  <div class="card">
+    <h2>1) Login</h2>
+    <div class="row">
+      <div class="col"><label>Username<br/><input id="u" placeholder="username" /></label></div>
+      <div class="col"><label>Password<br/><input id="p" type="password" placeholder="password" /></label></div>
+      <div style="display:flex;align-items:flex-end"><button id="btnLogin">Login</button></div>
+    </div>
+    <p id="loginStatus" class="muted"></p>
+  </div>
+
+  <div class="row">
+    <div class="col card">
+      <h2>2) Live Categories</h2>
+      <ul id="catList"><li class="muted">Log in to load categories…</li></ul>
+    </div>
+    <div class="col card">
+      <h2>3) Channels</h2>
+      <ul id="chanList"><li class="muted">Pick a category…</li></ul>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>4) Player</h2>
+    <p class="muted">Tries proxied playback first. If your proxy can’t stream HLS yet, we can add that.</p>
+    <video id="video" controls></video>
+  </div>
+
+  <div class="card">
+    <h2>Debug Log</h2>
+    <div id="log"></div>
+  </div>
+
+<script>
+const $ = s => document.querySelector(s);
+const log = (...a) => { console.log(...a); $("#log").textContent += a.map(x => typeof x==='string'? x : JSON.stringify(x,null,2)).join(' ') + "\n"; };
+
+let creds = { u:"", p:"" };
+let serverInfo = {};
+
+$("#btnLogin").addEventListener("click", async () => {
+  creds.u = $("#u").value.trim();
+  creds.p = $("#p").value.trim();
+  if (!creds.u || !creds.p) return alert("Enter username and password.");
+  $("#loginStatus").textContent = "Logging in…";
+  try {
+    const info = await api("get_user_info");
+    log("get_user_info:", info);
+    if (info?.user_info?.status === "Active") {
+      $("#loginStatus").textContent = `Logged in: ${info.user_info.username}`;
+      serverInfo = info.server_info || {};
+      await loadCategories();
+    } else {
+      $("#loginStatus").textContent = "Login failed or inactive account.";
+    }
+  } catch (e) {
+    $("#loginStatus").textContent = "Login error (see Debug Log)";
+    log("Login error:", e);
+  }
+});
+
+async function api(action, extra={}) {
+  const url = new URL(API_BASE);
+  url.searchParams.set("action", action);
+  url.searchParams.set("username", creds.u);
+  url.searchParams.set("password", creds.p);
+  for (const [k,v] of Object.entries(extra)) url.searchParams.set(k, v);
+  log("→", url.toString());
+  const r = await fetch(url.toString(), { credentials:"omit" });
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  const ct = r.headers.get("content-type") || "";
+  const t = await r.text();
+  try { return ct.includes("json") ? JSON.parse(t) : JSON.parse(t); } catch { return t; }
+}
+
+async function loadCategories() {
+  $("#catList").innerHTML = "<li class='muted'>Loading…</li>";
+  try {
+    const cats = await api("get_live_categories");
+    $("#catList").innerHTML = "";
+    (cats||[]).forEach(c => {
+      const li = document.createElement("li");
+      li.textContent = c.category_name || `Category ${c.category_id}`;
+      li.onclick = () => loadChannels(c.category_id);
+      $("#catList").appendChild(li);
+    });
+    if (!cats?.length) $("#catList").innerHTML = "<li class='muted'>No categories</li>";
+  } catch (e) {
+    $("#catList").innerHTML = "<li class='muted'>Error loading categories</li>";
+    log("Category error:", e);
+  }
+}
+
+async function loadChannels(category_id) {
+  $("#chanList").innerHTML = "<li class='muted'>Loading…</li>";
+  try {
+    const chans = await api("get_live_streams", { category_id });
+    $("#chanList").innerHTML = "";
+    (chans||[]).forEach(ch => {
+      const li = document.createElement("li");
+      li.textContent = ch.name || `Stream ${ch.stream_id}`;
+      li.onclick = () => playChannel(ch);
+      $("#chanList").appendChild(li);
+    });
+    if (!chans?.length) $("#chanList").innerHTML = "<li class='muted'>No channels</li>";
+  } catch (e) {
+    $("#chanList").innerHTML = "<li class='muted'>Error loading channels</li>";
+    log("Channel error:", e);
+  }
+}
+
+function buildDirectM3U8(stream_id) {
+  // Typical Xtream Codes URL. If your panel has HTTPS+CORS you could use it directly.
+  // We’ll prefer proxied playback to avoid mixed content/CORS.
+  return `http://YOUR-PANEL/live/${encodeURIComponent(creds.u)}/${encodeURIComponent(creds.p)}/${encodeURIComponent(stream_id)}.m3u8`;
+}
+
+async function playChannel(ch) {
+  const video = $("#video");
+  const direct = buildDirectM3U8(ch.stream_id);
+  const proxied = `${API_BASE}?action=proxy_stream&url=${encodeURIComponent(direct)}`;
+  log("Try proxied:", proxied);
+
+  const play = async (src) => {
+    if (window.Hls && Hls.isSupported()) {
+      const hls = new Hls();
+      hls.on(Hls.Events.ERROR, (_, d)=>log("HLS error:", d?.details||d));
+      hls.loadSource(src);
+      hls.attachMedia(video);
+      video.play().catch(e => log("Autoplay blocked, click play:", e));
+    } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+      video.src = src;
+      video.play().catch(e => log("Autoplay blocked:", e));
+    } else {
+      alert("HLS not supported in this browser.");
+    }
+  };
+
+  // Prefer proxied (needs your proxy to stream .m3u8/.ts with CORS)
+  try { await play(proxied); } 
+  catch (e) { log("Proxied failed, trying direct:", e); await play(direct); }
+}
+</script>
+</body>
+</html>
